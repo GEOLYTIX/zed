@@ -345,6 +345,14 @@ struct WgpuAtlasTexture {
     live_atlas_keys: u32,
 }
 
+// WebGPU frees a texture only when told to or when JavaScript collects it, which can be long
+// after the atlas lets go of it; atlases churning through images then run out of GPU memory.
+impl Drop for WgpuAtlasTexture {
+    fn drop(&mut self) {
+        self.texture.destroy();
+    }
+}
+
 impl WgpuAtlasTexture {
     fn allocate(&mut self, size: Size<DevicePixels>) -> Option<AtlasTile> {
         let allocation = self.allocator.allocate(device_size_to_etagere(size))?;
