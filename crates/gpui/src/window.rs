@@ -5081,6 +5081,30 @@ impl Window {
         });
     }
 
+    /// Paint a primitive drawn by the application's own GPU code into the scene for the next
+    /// frame at the current z-index. The renderer passes `painter` to its custom paint hook,
+    /// which downcasts it to the type that renderer draws; see `gpui_wgpu::CustomPaint`.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_custom(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        painter: Arc<dyn std::any::Any + Send + Sync>,
+    ) {
+        use crate::PaintCustom;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintCustom {
+            order: 0,
+            bounds,
+            content_mask,
+            painter,
+        });
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {

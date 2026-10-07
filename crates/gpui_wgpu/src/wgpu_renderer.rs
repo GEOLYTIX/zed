@@ -1,4 +1,4 @@
-use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
+use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext, custom_paint};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
@@ -1468,7 +1468,7 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, clear_color)
+        self.record_frame(scene, target_view, size, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1479,6 +1479,7 @@ impl WgpuRendererCore {
         &mut self,
         scene: &Scene,
         frame_view: &wgpu::TextureView,
+        size: Size<DevicePixels>,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
         let mut instance_offset = 0;
@@ -1504,6 +1505,21 @@ impl WgpuRendererCore {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("main_encoder"),
                 });
+
+        for custom in &scene.customs {
+            if let Some(painter) = custom_paint::painter(custom) {
+                let resources = self.resources();
+                painter.prepare(&mut custom_paint::CustomPrepareContext {
+                    device: &resources.device,
+                    queue: &resources.queue,
+                    encoder: &mut encoder,
+                    target_format: self.target_format,
+                    viewport: size,
+                    bounds: custom.bounds,
+                    clip: custom.bounds.intersect(&custom.content_mask.bounds),
+                });
+            }
+        }
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1612,6 +1628,36 @@ impl WgpuRendererCore {
                     // Surfaces are macOS-only for video playback and are not
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {}
+                    PrimitiveBatch::Customs(range) => {
+                        for custom in &scene.customs[range] {
+                            let clip = custom.bounds.intersect(&custom.content_mask.bounds);
+                            let (Some(painter), Some([x, y, w, h])) = (
+                                custom_paint::painter(custom),
+                                custom_paint::scissor(clip, size),
+                            ) else {
+                                continue;
+                            };
+                            let resources = self.resources();
+                            pass.set_scissor_rect(x, y, w, h);
+                            painter.paint(
+                                &mut pass,
+                                &custom_paint::CustomPaintContext {
+                                    device: &resources.device,
+                                    queue: &resources.queue,
+                                    target_format: self.target_format,
+                                    viewport: size,
+                                    bounds: custom.bounds,
+                                    clip,
+                                },
+                            );
+                            pass.set_scissor_rect(
+                                0,
+                                0,
+                                size.width.0 as u32,
+                                size.height.0 as u32,
+                            );
+                        }
+                    }
                 }
             }
         }

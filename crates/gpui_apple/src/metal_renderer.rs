@@ -774,6 +774,8 @@ impl MetalRenderer {
                     viewport_size,
                     command_encoder,
                 ),
+                // Custom painting is only implemented by the WGPU renderer.
+                PrimitiveBatch::Customs(_) => {}
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }

@@ -9,10 +9,12 @@ use crate::{
     Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
+    any::Any,
     fmt::Debug,
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
+    sync::Arc,
 };
 
 #[allow(non_camel_case_types, unused)]
@@ -50,6 +52,7 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    pub customs: Vec<PaintCustom>,
 }
 
 #[expect(missing_docs)]
@@ -66,6 +69,7 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.customs.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -133,6 +137,10 @@ impl Scene {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
             }
+            Primitive::Custom(custom) => {
+                custom.order = order;
+                self.customs.push(custom.clone());
+            }
         }
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
@@ -160,6 +168,7 @@ impl Scene {
         self.polychrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.surfaces.sort_by_key(|surface| surface.order);
+        self.customs.sort_by_key(|custom| custom.order);
     }
 
     #[cfg_attr(
@@ -187,6 +196,8 @@ impl Scene {
             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
+            customs_start: 0,
+            customs_iter: self.customs.iter().peekable(),
         }
     }
 }
@@ -209,6 +220,7 @@ pub(crate) enum PrimitiveKind {
     SubpixelSprite,
     PolychromeSprite,
     Surface,
+    Custom,
 }
 
 pub(crate) enum PaintOperation {
@@ -228,6 +240,7 @@ pub enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
+    Custom(PaintCustom),
 }
 
 #[expect(missing_docs)]
@@ -242,6 +255,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
+            Primitive::Custom(custom) => &custom.bounds,
         }
     }
 
@@ -255,6 +269,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
+            Primitive::Custom(custom) => &custom.content_mask,
         }
     }
 }
@@ -283,6 +298,8 @@ struct BatchIterator<'a> {
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
+    customs_start: usize,
+    customs_iter: Peekable<slice::Iter<'a, PaintCustom>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -315,6 +332,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.surfaces_iter.peek().map(|s| s.order),
                 PrimitiveKind::Surface,
+            ),
+            (
+                self.customs_iter.peek().map(|c| c.order),
+                PrimitiveKind::Custom,
             ),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
@@ -461,6 +482,20 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.surfaces_start = surfaces_end;
                 Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
             }
+            PrimitiveKind::Custom => {
+                let customs_start = self.customs_start;
+                let mut customs_end = customs_start + 1;
+                self.customs_iter.next();
+                while self
+                    .customs_iter
+                    .next_if(|custom| (custom.order, batch_kind) < max_order_and_kind)
+                    .is_some()
+                {
+                    customs_end += 1;
+                }
+                self.customs_start = customs_end;
+                Some(PrimitiveBatch::Customs(customs_start..customs_end))
+            }
         }
     }
 }
@@ -493,6 +528,8 @@ pub enum PrimitiveBatch {
         range: Range<usize>,
     },
     Surfaces(Range<usize>),
+    /// Primitives painted by the application, in paint order.
+    Customs(Range<usize>),
 }
 
 impl PrimitiveBatch {
@@ -525,6 +562,7 @@ impl PrimitiveBatch {
                 )
             }
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
+            Self::Customs(range) => format!("customs ({})", range.len()),
         }
     }
 }
@@ -776,6 +814,27 @@ pub struct PaintSurface {
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
         Primitive::Surface(surface)
+    }
+}
+
+/// A primitive the application draws with its own GPU code. The renderer hands `painter` to
+/// the platform's custom paint hook, which downcasts it to the type that renderer knows how to
+/// draw; renderers without a hook skip it.
+#[derive(Clone)]
+pub struct PaintCustom {
+    /// The order the primitive is drawn in, assigned by the scene.
+    pub order: DrawOrder,
+    /// Where the primitive draws, in device pixels.
+    pub bounds: Bounds<ScaledPixels>,
+    /// The clip it draws within, in device pixels.
+    pub content_mask: ContentMask<ScaledPixels>,
+    /// The renderer-specific painter.
+    pub painter: Arc<dyn Any + Send + Sync>,
+}
+
+impl From<PaintCustom> for Primitive {
+    fn from(custom: PaintCustom) -> Self {
+        Primitive::Custom(custom)
     }
 }
 
